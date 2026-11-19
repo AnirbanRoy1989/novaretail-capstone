@@ -1,0 +1,129 @@
+"""Google ADK/LLM layer for the NovaRetail executive-deck generator."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from typing import Any
+
+import pandas as pd
+from google.adk.agents import LlmAgent
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+from pydantic import BaseModel, Field
+
+_DATA: dict[str, pd.DataFrame] = {}
+
+
+class DeckNarrative(BaseModel):
+    executive_summary: str
+    performance_headline: str
+    performance_bullets: list[str] = Field(min_length=4, max_length=4)
+    customer_headline: str
+    customer_bullets: list[str] = Field(min_length=4, max_length=4)
+    risk_headline: str
+    risk_bullets: list[str] = Field(min_length=4, max_length=4)
+    recommendations: list[str] = Field(min_length=4, max_length=4)
+    closing_statement: str
+
+
+def get_metric(sheet: str, quarter: str, region: str, metric: str) -> dict[str, Any]:
+    """Return one exact metric from the supplied workbook."""
+    df = _DATA.get(sheet)
+    if df is None:
+        return {"status": "error", "message": f"Unknown sheet: {sheet}"}
+    rows = df[(df["Quarter"] == quarter) & (df["Region"] == region)]
+    if rows.empty or metric not in rows.columns:
+        return {"status": "error", "message": "No matching value"}
+    return {"status": "success", "value": rows.iloc[0][metric].item()}
+
+
+def rank_regions(sheet: str, quarter: str, metric: str, descending: bool = True) -> dict[str, Any]:
+    """Rank all regions for a metric in a quarter."""
+    df = _DATA.get(sheet)
+    if df is None or metric not in df.columns:
+        return {"status": "error", "message": "Unknown sheet or metric"}
+    rows = df[df["Quarter"] == quarter][["Region", metric]].sort_values(metric, ascending=not descending)
+    return {"status": "success", "ranking": rows.to_dict(orient="records")}
+
+
+def compare_quarters(sheet: str, region: str, metric: str, current_quarter: str, prior_quarter: str) -> dict[str, Any]:
+    """Compare a regional metric across two quarters and return absolute and percentage change."""
+    df = _DATA.get(sheet)
+    if df is None or metric not in df.columns:
+        return {"status": "error", "message": "Unknown sheet or metric"}
+    indexed = df[df["Region"] == region].set_index("Quarter")
+    try:
+        current = float(indexed.loc[current_quarter, metric])
+        prior = float(indexed.loc[prior_quarter, metric])
+    except KeyError:
+        return {"status": "error", "message": "Quarter or region not found"}
+    return {
+        "status": "success",
+        "current": current,
+        "prior": prior,
+        "absolute_change": current - prior,
+        "pct_change": None if prior == 0 else current / prior - 1,
+    }
+
+
+root_agent = LlmAgent(
+    name="novaretail_qbr_agent",
+    model=os.getenv("NOVARETAIL_MODEL", "gemini-2.5-flash"),
+    description="Analyzes NovaRetail quarterly data and writes evidence-based executive-deck narratives.",
+    instruction=(
+        "You are a retail QBR analyst. Use the provided function tools to verify every important claim. "
+        "Return concise, insight-led executive language. Do not invent values. Highlight growth, customer "
+        "experience, operational risks, and actions. Return only the requested structured output."
+    ),
+    tools=[get_metric, rank_regions, compare_quarters],
+    output_schema=DeckNarrative,
+    output_key="deck_narrative",
+)
+
+
+async def _run_agent(prompt: str) -> DeckNarrative:
+    service = InMemorySessionService()
+    app_name, user_id, session_id = "novaretail_deck", "deck_builder", "qbr_session"
+    await service.create_session(app_name=app_name, user_id=user_id, session_id=session_id)
+    runner = Runner(agent=root_agent, app_name=app_name, session_service=service)
+    message = types.Content(role="user", parts=[types.Part(text=prompt)])
+    final_text = ""
+    async for event in runner.run_async(user_id=user_id, session_id=session_id, new_message=message):
+        if event.is_final_response() and event.content and event.content.parts:
+            final_text = "".join(part.text or "" for part in event.content.parts)
+    if not final_text:
+        session = await service.get_session(app_name=app_name, user_id=user_id, session_id=session_id)
+        stored = session.state.get("deck_narrative") if session else None
+        if stored:
+            return DeckNarrative.model_validate(stored)
+        raise RuntimeError("The ADK agent returned no final response")
+    return DeckNarrative.model_validate(json.loads(final_text))
+
+
+def generate_deck_content(perf: pd.DataFrame, cx: pd.DataFrame, risk: pd.DataFrame) -> DeckNarrative:
+    """Generate the deck narrative through Google ADK and a Gemini-backed LlmAgent."""
+    if not os.getenv("GOOGLE_API_KEY") and not os.getenv("GOOGLE_GENAI_USE_VERTEXAI"):
+        raise RuntimeError(
+            "Google ADK integration is enabled, but authentication is missing. Set GOOGLE_API_KEY, "
+            "or configure Vertex AI with GOOGLE_GENAI_USE_VERTEXAI=TRUE, GOOGLE_CLOUD_PROJECT, "
+            "and GOOGLE_CLOUD_LOCATION."
+        )
+    _DATA.clear()
+    _DATA.update({
+        "Regional_Performance": perf.copy(),
+        "Customer_Experience": cx.copy(),
+        "Operational_Risk": risk.copy(),
+    })
+    latest = list(perf["Quarter"].drop_duplicates())[-1]
+    prior = list(perf["Quarter"].drop_duplicates())[-2]
+    prompt = f"""
+Create the narrative for a fixed five-slide NovaRetail QBR deck for {latest}; compare with {prior}.
+Required output fields: executive_summary; performance_headline and exactly four performance_bullets;
+customer_headline and exactly four customer_bullets; risk_headline and exactly four risk_bullets;
+exactly four recommendations; closing_statement.
+Keep headlines under 12 words, bullets under 28 words, and the summary under 90 words.
+Use the tools to verify rankings, values, and quarter-over-quarter changes before writing.
+"""
+    return asyncio.run(_run_agent(prompt))
