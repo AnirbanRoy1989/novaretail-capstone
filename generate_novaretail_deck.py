@@ -2,6 +2,7 @@ from pathlib import Path
 from datetime import date
 import math
 import pandas as pd
+from novaretail_agent import generate_deck_content
 from pptx import Presentation
 from pptx.chart.data import ChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION
@@ -123,6 +124,7 @@ def main():
     qoq = revenue / prior_revenue - 1
     avg_nps = latest_cx.NPS.mean()
     growth = (latest_perf.Revenue_USD_M / prior_perf.Revenue_USD_M - 1).sort_values(ascending=False)
+    ai = generate_deck_content(perf, cx, risk)
 
     prs = Presentation(TEMPLATE)
 
@@ -135,73 +137,50 @@ def main():
     set_text(shape(s, 'kpi2_label'), 'Revenue vs Q1 2026', 12, RGBColor(202,220,252))
     set_text(shape(s, 'kpi3_value'), f'{avg_nps:.1f}', 28, WHITE, bold=True)
     set_text(shape(s, 'kpi3_label'), 'Average regional NPS', 12, RGBColor(202,220,252))
-    summary = (f'NovaRetail closed Q2 at ${revenue/1000:.2f}B revenue, up {qoq:.1%} sequentially. '
-               f'APAC led momentum with {growth.index[0]} revenue growth of {growth.iloc[0]:.1%} and the highest NPS at {latest_cx.loc["APAC","NPS"]}. '
-               f'North America remained the largest market at ${latest_perf.loc["North America","Revenue_USD_M"]:.0f}M. '
-               f'Latin America is the priority risk: revenue declined {abs(growth.loc["Latin America"]):.1%}, while returns, stockouts and fraud all worsened.')
+    summary = ai.executive_summary
     set_text(shape(s, 'summary_text'), summary, 17, WHITE)
     remove_shape(s, 'icon_1_label'); add_icon(s, 'icon_1', 'icon_overall', '↗', TEAL)
 
     # Slide 2
     s = prs.slides[1]
-    set_text(shape(s, 'title_2'), 'APAC accelerates while Latin America contracts', 25, NAVY, bold=True, italic=False)
+    set_text(shape(s, 'title_2'), ai.performance_headline, 25, NAVY, bold=True, italic=False)
     b = shape(s, 'chart_performance')
     add_native_chart(s, b, XL_CHART_TYPE.COLUMN_CLUSTERED, regions,
                      [(q, [perf[(perf.Quarter==q)&(perf.Region==r)].Revenue_USD_M.iloc[0] for r in regions]) for q in quarters],
                      'Revenue by region (USD M)')
     remove_shape(s, 'chart_performance_label')
-    bullets = [
-        f'APAC delivered the strongest Q2 growth at {growth.loc["APAC"]:.1%} QoQ, reaching ${latest_perf.loc["APAC","Revenue_USD_M"]:.0f}M.',
-        f'North America generated ${latest_perf.loc["North America","Revenue_USD_M"]:.0f}M and remains 36% of group revenue.',
-        f'Europe recovered {growth.loc["Europe"]:.1%} QoQ to ${latest_perf.loc["Europe","Revenue_USD_M"]:.0f}M.',
-        f'Latin America fell {abs(growth.loc["Latin America"]):.1%} QoQ; returns rose to {latest_perf.loc["Latin America","Returns_Rate_pct"]:.1f}% even as marketing spend decreased.'
-    ]
+    bullets = ai.performance_bullets
     set_text(shape(s, 'insights_performance'), bullets, 15, NAVY, bullets=True)
     remove_shape(s, 'icon_2_label'); add_icon(s, 'icon_2', 'icon_growth', '↗', TEAL)
 
     # Slide 3
     s = prs.slides[2]
-    set_text(shape(s, 'title_3'), 'Customer experience improves everywhere except Latin America', 24, NAVY, bold=True, italic=False)
+    set_text(shape(s, 'title_3'), ai.customer_headline, 24, NAVY, bold=True, italic=False)
     b = shape(s, 'chart_customer')
     add_native_chart(s, b, XL_CHART_TYPE.LINE_MARKERS, quarters,
                      [(r, list(cx[cx.Region==r].NPS)) for r in regions], 'NPS trend by region')
     remove_shape(s, 'chart_customer_label')
-    bullets = [
-        f'APAC leads at NPS {latest_cx.loc["APAC","NPS"]} and {latest_cx.loc["APAC","CSAT_pct"]:.0f}% CSAT, with the fastest delivery at {latest_cx.loc["APAC","Avg_Delivery_Days"]:.1f} days.',
-        f'Europe improved to NPS {latest_cx.loc["Europe","NPS"]}, up 5 points since Q3 2025.',
-        f'North America remains stable at NPS {latest_cx.loc["North America","NPS"]} and {latest_cx.loc["North America","CSAT_pct"]:.0f}% CSAT.',
-        f'Latin America dropped to NPS {latest_cx.loc["Latin America","NPS"]}; delivery lengthened to {latest_cx.loc["Latin America","Avg_Delivery_Days"]:.1f} days and tickets reached {latest_cx.loc["Latin America","Support_Tickets_K"]:.0f}K.'
-    ]
+    bullets = ai.customer_bullets
     set_text(shape(s, 'insights_customer'), bullets, 15, NAVY, bullets=True)
     remove_shape(s, 'icon_3_label'); add_icon(s, 'icon_3', 'icon_customer', '★', BLUE)
 
     # Slide 4
     s = prs.slides[3]
-    set_text(shape(s, 'title_4'), 'Operational strain is concentrated in Latin America and APAC', 24, NAVY, bold=True, italic=False)
+    set_text(shape(s, 'title_4'), ai.risk_headline, 24, NAVY, bold=True, italic=False)
     b = shape(s, 'chart_risk')
     add_native_chart(s, b, XL_CHART_TYPE.BAR_CLUSTERED, regions,
                      [('Stockout rate (%)', [latest_risk.loc[r,'Stockout_Rate_pct'] for r in regions])],
                      'Q2 2026 stockout rate (%)')
     remove_shape(s, 'chart_risk_label')
-    bullets = [
-        f'Latin America has the highest stockout rate at {latest_risk.loc["Latin America","Stockout_Rate_pct"]:.1f}% and slowest returns at {latest_risk.loc["Latin America","Return_Processing_Days"]:.0f} days.',
-        f'Fraud incidents in Latin America rose to {latest_risk.loc["Latin America","Fraud_Incidents"]:.0f}, versus 18 in Q3 2025.',
-        f'APAC capacity reached {latest_risk.loc["APAC","Warehouse_Capacity_Util_pct"]:.0f}% and stockouts climbed to {latest_risk.loc["APAC","Stockout_Rate_pct"]:.1f}%, signalling a growth constraint.',
-        f'North America and Europe are comparatively controlled, with Q2 stockouts at {latest_risk.loc["North America","Stockout_Rate_pct"]:.1f}% and {latest_risk.loc["Europe","Stockout_Rate_pct"]:.1f}%.'
-    ]
+    bullets = ai.risk_bullets
     set_text(shape(s, 'insights_risk'), bullets, 14.5, NAVY, bullets=True)
     remove_shape(s, 'icon_4_label'); add_icon(s, 'icon_4', 'icon_risk', '!', RED)
 
     # Slide 5
     s = prs.slides[4]
-    actions = [
-        'EXPAND APAC CAPACITY: create a Q3 capacity plan to bring warehouse utilisation below 90% and arrest the rise in stockouts.',
-        'STABILISE LATIN AMERICA FULFILMENT: launch a 30-day root-cause sprint across inventory allocation, carrier performance and return processing.',
-        'TIGHTEN FRAUD CONTROLS: review high-risk transactions and payment rules in Latin America, where incidents reached 30 in Q2.',
-        'REALLOCATE GROWTH INVESTMENT: protect APAC momentum while tying Latin America marketing spend to service-level recovery gates.'
-    ]
+    actions = ai.recommendations
     set_text(shape(s, 'recommendations_text'), actions, 18, WHITE, bullets=True)
-    set_text(shape(s, 'closing_statement'), 'Leadership decision: fund capacity where growth is proven and make Latin America recovery the next-quarter operating priority.', 15, RGBColor(202,220,252), bold=True, italic=False)
+    set_text(shape(s, 'closing_statement'), ai.closing_statement, 15, RGBColor(202,220,252), bold=True, italic=False)
     remove_shape(s, 'icon_5_label'); add_icon(s, 'icon_5', 'icon_action', '✓', ORANGE)
 
     prs.save(OUTPUT)
